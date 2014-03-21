@@ -72,6 +72,17 @@
 #include <ctype.h>
 #endif
 
+#ifdef SEMC_ICS_CAMERA_BLOB
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <linux/fs.h>
+
+#define PMEM_IOCTL_MAGIC 'p'
+#define PMEM_GET_RECORDING_BUFFER_INFO          _IOW(PMEM_IOCTL_MAGIC, 16, unsigned int)
+
+#define OMX_COMPONENT_CAPABILITY_TYPE_INDEX 0xFF7A347
+#endif
+
 namespace android {
 
 #ifdef USE_SAMSUNG_COLORFORMAT
@@ -1906,6 +1917,15 @@ status_t OMXCodec::allocateBuffers() {
     return allocateBuffersOnPort(kPortIndexOutput);
 }
 
+#ifdef SEMC_ICS_CAMERA_BLOB
+typedef struct recordingbuffer_info
+{
+    unsigned int fd;
+    unsigned int user_vaddr;
+    unsigned int size;
+} recordingbuffer_info;
+#endif
+
 status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
     if (mNativeWindow != NULL && portIndex == kPortIndexOutput) {
         return allocateOutputBuffersFromNativeWindow();
@@ -1944,6 +1964,44 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
     size_t totalSize = def.nBufferCountActual * def.nBufferSize;
     mDealer[portIndex] = new MemoryDealer(totalSize, "OMXCodec");
 
+#ifdef SEMC_ICS_CAMERA_BLOB
+    OMX_QCOM_PLATFORM_PRIVATE_PMEM_INFO pmeminfo;
+    recordingbuffer_info recbuf;
+
+    if (portIndex == kPortIndexInput && !strncmp(mComponentName,"OMX.qcom.video.encoder.",23 )) {
+        mQuirks |= kXperiaAvoidMemcopyInputRecordingFrames;
+        OMX_U32 m_nDriver_fd;
+        recbuf.size = totalSize;
+
+        CODEC_LOGV("Trying to get recording buffer...\n");
+        mQuirks &= ~kRequiresAllocateBufferOnInputPorts;
+        m_nDriver_fd = open ("/dev/pmem_adsp",O_RDWR|O_NONBLOCK);
+
+        if (m_nDriver_fd == 0) {
+            CODEC_LOGE("ERROR: Got fd as 0 for pmem_adsp, Opening again\n");
+            m_nDriver_fd = open ("/dev/pmem_adsp",O_RDWR|O_NONBLOCK);
+        }
+
+        if ((int)m_nDriver_fd < 0) {
+            CODEC_LOGE("ERROR: Got fd as 0 for pmem_adsp, Returning failure\n");
+            return err;
+        }
+
+        CODEC_LOGV("pmem_adsp m_nDriver_fd = %d\n", m_nDriver_fd);
+
+        if (ioctl (m_nDriver_fd,PMEM_GET_RECORDING_BUFFER_INFO,(void*)&recbuf) < 0) {
+            CODEC_LOGE("ERROR: Request for recording buffer parameters failed\n");
+            return err;
+        }
+
+        close(m_nDriver_fd);
+
+        CODEC_LOGV("recordingbuffer_info - fd: %u, user_vaddr: %u\n", recbuf.fd,recbuf.user_vaddr);
+
+        pmeminfo.pmem_fd = recbuf.fd;
+    }
+#endif
+
     for (OMX_U32 i = 0; i < def.nBufferCountActual; ++i) {
         sp<IMemory> mem = mDealer[portIndex]->allocate(def.nBufferSize);
         CHECK(mem.get() != NULL);
@@ -1978,6 +2036,17 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
                 err = mOMX->allocateBufferWithBackup(
                         mNode, portIndex, mem, &buffer);
             }
+#ifdef SEMC_ICS_CAMERA_BLOB
+        } else if (portIndex == kPortIndexInput
+                && (mQuirks & kXperiaAvoidMemcopyInputRecordingFrames)) {
+            pmeminfo.offset = i * def.nBufferSize;
+            CODEC_LOGE("pmeminfo.offset= %u, vaddr: %u\n",
+                    pmeminfo.offset, recbuf.user_vaddr + i * def.nBufferSize);
+
+            err = mOMX->useBufferPmem(
+                    mNode, portIndex, &pmeminfo, def.nBufferSize,
+                    (void*)(recbuf.user_vaddr + i * def.nBufferSize), &buffer);
+#endif
         } else {
             err = mOMX->useBuffer(mNode, portIndex, mem, &buffer);
         }
@@ -3614,6 +3683,19 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
 
                 CHECK(info->mMediaBuffer == NULL);
                 info->mMediaBuffer = srcBuffer;
+#ifdef SEMC_ICS_CAMERA_BLOB
+        } else if (mIsEncoder && (mQuirks & kXperiaAvoidMemcopyInputRecordingFrames)) {
+            CHECK(mOMXLivesLocally && offset == 0);
+
+            OMX_BUFFERHEADERTYPE *header =
+                (OMX_BUFFERHEADERTYPE *) info->mBuffer;
+
+            header->pBuffer =
+                (OMX_U8 *)srcBuffer->data() + srcBuffer->range_offset();
+
+            releaseBuffer = false;
+            info->mMediaBuffer = srcBuffer;
+#endif
         } else {
 #ifdef USE_SAMSUNG_COLORFORMAT
             OMX_PARAM_PORTDEFINITIONTYPE def;
@@ -5223,6 +5305,23 @@ void OMXCodec::initOutputFormat(const sp<MetaData> &inputFormat) {
 #ifdef QCOM_HARDWARE
             } else {
                 ExtendedUtils::HFR::copyHFRParams(inputFormat, mOutputFormat);
+#ifdef SEMC_ICS_CAMERA_BLOB
+                typedef struct OMXComponentCapabilityFlagsType
+                {
+                    OMX_BOOL iIsOMXComponentMultiThreaded;
+                    OMX_BOOL iOMXComponentSupportsExternalOutputBufferAlloc;
+                    OMX_BOOL iOMXComponentSupportsExternalInputBufferAlloc;
+                    OMX_BOOL iOMXComponentSupportsMovableInputBuffers;
+                    OMX_BOOL iOMXComponentSupportsPartialFrames;
+                    OMX_BOOL iOMXComponentUsesNALStartCodes;
+                    OMX_BOOL iOMXComponentCanHandleIncompleteFrames;
+                    OMX_BOOL iOMXComponentUsesFullAVCFrames;
+                } OMXComponentCapabilityFlagsType;
+
+                OMXComponentCapabilityFlagsType junk;
+                mOMX->getParameter(mNode, (OMX_INDEXTYPE) OMX_COMPONENT_CAPABILITY_TYPE_INDEX,
+                        &junk, sizeof(junk) );
+#endif
 #endif
             }
             break;

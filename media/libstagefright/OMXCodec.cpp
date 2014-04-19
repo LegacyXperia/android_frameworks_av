@@ -73,14 +73,9 @@
 #endif
 
 #ifdef SEMC_ICS_CAMERA_BLOB
-#include <sys/ioctl.h>
-#include <fcntl.h>
-#include <linux/fs.h>
-
-#define PMEM_IOCTL_MAGIC 'p'
-#define PMEM_GET_RECORDING_BUFFER_INFO          _IOW(PMEM_IOCTL_MAGIC, 16, unsigned int)
-
-#define OMX_COMPONENT_CAPABILITY_TYPE_INDEX 0xFF7A347
+#include <binder/IMemory.h>
+#include <binder/MemoryBase.h>
+#include <binder/MemoryHeapBase.h>
 #endif
 
 namespace android {
@@ -1917,15 +1912,6 @@ status_t OMXCodec::allocateBuffers() {
     return allocateBuffersOnPort(kPortIndexOutput);
 }
 
-#ifdef SEMC_ICS_CAMERA_BLOB
-typedef struct recordingbuffer_info
-{
-    unsigned int fd;
-    unsigned int user_vaddr;
-    unsigned int size;
-} recordingbuffer_info;
-#endif
-
 status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
     if (mNativeWindow != NULL && portIndex == kPortIndexOutput) {
         return allocateOutputBuffersFromNativeWindow();
@@ -1966,39 +1952,10 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
 
 #ifdef SEMC_ICS_CAMERA_BLOB
     OMX_QCOM_PLATFORM_PRIVATE_PMEM_INFO pmeminfo;
-    recordingbuffer_info recbuf;
 
     if (portIndex == kPortIndexInput && !strncmp(mComponentName,"OMX.qcom.video.encoder.",23 )) {
         mQuirks |= kXperiaAvoidMemcopyInputRecordingFrames;
-        OMX_U32 m_nDriver_fd;
-        recbuf.size = totalSize;
-
-        CODEC_LOGV("Trying to get recording buffer...\n");
         mQuirks &= ~kRequiresAllocateBufferOnInputPorts;
-        m_nDriver_fd = open ("/dev/pmem_adsp",O_RDWR|O_NONBLOCK);
-
-        if (m_nDriver_fd == 0) {
-            CODEC_LOGE("ERROR: Got fd as 0 for pmem_adsp, Opening again\n");
-            m_nDriver_fd = open ("/dev/pmem_adsp",O_RDWR|O_NONBLOCK);
-        }
-
-        if ((int)m_nDriver_fd < 0) {
-            CODEC_LOGE("ERROR: Got fd as 0 for pmem_adsp, Returning failure\n");
-            return err;
-        }
-
-        CODEC_LOGV("pmem_adsp m_nDriver_fd = %d\n", m_nDriver_fd);
-
-        if (ioctl (m_nDriver_fd,PMEM_GET_RECORDING_BUFFER_INFO,(void*)&recbuf) < 0) {
-            CODEC_LOGE("ERROR: Request for recording buffer parameters failed\n");
-            return err;
-        }
-
-        close(m_nDriver_fd);
-
-        CODEC_LOGV("recordingbuffer_info - fd: %u, user_vaddr: %u\n", recbuf.fd,recbuf.user_vaddr);
-
-        pmeminfo.pmem_fd = recbuf.fd;
     }
 #endif
 
@@ -2039,13 +1996,15 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
 #ifdef SEMC_ICS_CAMERA_BLOB
         } else if (portIndex == kPortIndexInput
                 && (mQuirks & kXperiaAvoidMemcopyInputRecordingFrames)) {
-            pmeminfo.offset = i * def.nBufferSize;
-            CODEC_LOGE("pmeminfo.offset= %u, vaddr: %u\n",
-                    pmeminfo.offset, recbuf.user_vaddr + i * def.nBufferSize);
-
-            err = mOMX->useBufferPmem(
-                    mNode, portIndex, &pmeminfo, def.nBufferSize,
-                    (void*)(recbuf.user_vaddr + i * def.nBufferSize), &buffer);
+            sp<MemoryBase>* ptrbuffer;
+            mSource->getRecordingBuffer(i, &ptrbuffer);
+            ssize_t offset;
+            size_t size;
+            sp<IMemoryHeap> heap = (*ptrbuffer)->getMemory(&offset, &size);
+            pmeminfo.pmem_fd = heap->getHeapID();
+            pmeminfo.offset = offset;
+            err = mOMX->useBufferPmem(mNode, portIndex, &pmeminfo, def.nBufferSize,
+                    (*ptrbuffer)->pointer(), &buffer);
 #endif
         } else {
             err = mOMX->useBuffer(mNode, portIndex, mem, &buffer);

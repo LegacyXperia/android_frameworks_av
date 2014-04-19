@@ -40,6 +40,12 @@
 
 #include "include/ExtendedUtils.h"
 
+#ifdef SEMC_ICS_CAMERA_BLOB
+#include <binder/IMemory.h>
+#include <binder/MemoryBase.h>
+#include <binder/MemoryHeapBase.h>
+#endif
+
 namespace android {
 
 static const int64_t CAMERA_SOURCE_TIMEOUT_NS = 3000000000LL;
@@ -604,12 +610,33 @@ CameraSource::~CameraSource() {
     }
 }
 
+#ifdef SEMC_ICS_CAMERA_BLOB
+sp<MemoryBase> *mRecordingBuffers;
+
+status_t CameraSource::getRecordingBuffer(unsigned int index, sp<MemoryBase>** buffer)
+{
+    ALOGE("getRecordingBuffer");
+    *buffer = &mRecordingBuffers[index];
+    return OK;
+}
+#endif
+
 void CameraSource::startCameraRecording() {
     ALOGV("startCameraRecording");
     // Reset the identity to the current thread because media server owns the
     // camera and recording is started by the applications. The applications
     // will connect to the camera in ICameraRecordingProxy::startRecording.
     int64_t token = IPCThreadState::self()->clearCallingIdentity();
+#ifdef SEMC_ICS_CAMERA_BLOB
+    sp<MemoryBase>* ptrbuffer;
+    mRecordingBuffers = new sp<MemoryBase>[9];
+
+    for (uint_t i = 0; i < 9; i++) {
+        mCamera->getRecordingBuffer(i, &ptrbuffer);
+        ALOGE("Camerabuffer 0 ptr %p ", ptrbuffer);
+        mRecordingBuffers[i] = *ptrbuffer;
+    }
+#endif
     if (mNumInputBuffers > 0) {
         status_t err = mCamera->sendCommand(
             CAMERA_CMD_SET_VIDEO_BUFFER_COUNT, mNumInputBuffers, 0);
@@ -697,6 +724,9 @@ void CameraSource::stopCameraRecording() {
         mCamera->setListener(NULL);
         mCamera->stopRecording();
     }
+#ifdef SEMC_ICS_CAMERA_BLOB
+    delete [] mRecordingBuffers;
+#endif
 }
 
 void CameraSource::releaseCamera() {

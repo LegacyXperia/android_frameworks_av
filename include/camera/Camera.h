@@ -27,6 +27,11 @@
 #include <camera/ICamera.h>
 #include <camera/CameraBase.h>
 
+#ifdef SEMC_ICS_CAMERA_BLOB
+#include <binder/IMemory.h>
+#include <binder/MemoryBase.h>
+#endif
+
 namespace android {
 
 class Surface;
@@ -124,6 +129,10 @@ public:
 
             // tell camera hal to store meta data or real YUV in video buffers.
             status_t    storeMetaDataInBuffers(bool enabled);
+
+#ifdef SEMC_ICS_CAMERA_BLOB
+            status_t    getRecordingBuffer(unsigned int index, sp<MemoryBase>** buffer);
+#endif
 
             void        setListener(const sp<CameraListener>& listener);
             void        setRecordingProxyListener(const sp<ICameraRecordingProxyListener>& listener);

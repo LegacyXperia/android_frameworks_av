@@ -101,7 +101,7 @@ struct OMXCodec : public MediaSource,
         kRequiresLargerEncoderOutputBuffer    = 2048,
         kOutputBuffersAreUnreadable           = 4096,
 #ifdef SEMC_ICS_CAMERA_BLOB
-        kXperiaAvoidMemcopyInputRecordingFrames	= 32768,
+        kXperiaAvoidMemcopyInputRecordingFrames	= 8192,
 #endif
 #if defined(OMAP_ENHANCEMENT)
         kAvoidMemcopyInputRecordingFrames     = 0x20000000,
